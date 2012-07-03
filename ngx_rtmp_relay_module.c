@@ -12,6 +12,7 @@ static ngx_rtmp_play_pt             next_play;
 static ngx_rtmp_delete_stream_pt    next_delete_stream;
 
 
+static ngx_int_t ngx_rtmp_relay_init_process(ngx_cycle_t *cycle);
 static ngx_int_t ngx_rtmp_relay_postconfiguration(ngx_conf_t *cf);
 static void * ngx_rtmp_relay_create_app_conf(ngx_conf_t *cf);
 static char * ngx_rtmp_relay_merge_app_conf(ngx_conf_t *cf, 
@@ -20,6 +21,12 @@ static char * ngx_rtmp_relay_push_pull(ngx_conf_t *cf, ngx_command_t *cmd,
         void *conf);
 static ngx_int_t ngx_rtmp_relay_publish(ngx_rtmp_session_t *s, 
         ngx_rtmp_publish_t *v);
+
+
+#define NGX_RTMP_AUTO_RELAY
+
+
+#define NGX_RMP_RELAY_SOCK_PREFIX   "/tmp/nginx-rtmp."
 
 
 /*                _____
@@ -129,13 +136,124 @@ ngx_module_t  ngx_rtmp_relay_module = {
     NGX_RTMP_MODULE,                        /* module type */
     NULL,                                   /* init master */
     NULL,                                   /* init module */
-    NULL,                                   /* init process */
+    ngx_rtmp_relay_init_process,            /* init process */
     NULL,                                   /* init thread */
     NULL,                                   /* exit thread */
     NULL,                                   /* exit process */
     NULL,                                   /* exit master */
     NGX_MODULE_V1_PADDING
 };
+
+
+/*TODO: add exit_process handler deleting unix socket */
+static ngx_int_t
+ngx_rtmp_relay_init_process(ngx_cycle_t *cycle)
+{
+#ifdef NGX_RTMP_AUTO_RELAY
+
+/*#if (NGX_HAVE_UNIX_DOMAIN)*/
+    ngx_listening_t            *ls, *lss;
+    struct sockaddr_un         *sun;
+    int                         reuseaddr;
+    ngx_socket_t                s;
+    size_t                      n;
+
+    reuseaddr = 1;
+    s = (ngx_socket_t) -1;
+
+    ngx_log_debug0(NGX_LOG_DEBUG_RTMP, cycle->log, 0,
+            "creating auto-relay sockets");
+
+    /*TODO: clone all RTMP listenings? */
+    ls = cycle->listening.elts;
+    lss = NULL;
+    for (n = 0; n < cycle->listening.nelts; ++n, ++ls) {
+        if (ls->handler == ngx_rtmp_init_connection) {
+            lss = ls;
+            break;
+        }
+    }
+
+    if (lss == NULL) {
+        return NGX_OK;
+    }
+
+    ls = ngx_array_push(&cycle->listening);
+    if (ls == NULL) {
+        return NGX_ERROR;
+    }
+
+    *ls = *lss;
+
+    ls->socklen = sizeof(struct sockaddr_un);
+    sun = ngx_pcalloc(cycle->pool, ls->socklen);
+    ls->sockaddr = (struct sockaddr *) sun;
+    if (ls->sockaddr == NULL) {
+        return NGX_ERROR;
+    }
+    sun->sun_family = AF_UNIX;
+    *ngx_snprintf((u_char *) sun->sun_path, sizeof(sun->sun_path), 
+                 NGX_RMP_RELAY_SOCK_PREFIX "%i", (ngx_int_t)ngx_pid) = 0;
+
+    ngx_str_set(&ls->addr_text, "worker_socket");
+
+    s = ngx_socket(AF_UNIX, SOCK_STREAM, 0);
+    if (s == -1) {
+        ngx_log_error(NGX_LOG_EMERG, cycle->log, ngx_socket_errno,
+                      ngx_socket_n " worker_socket failed");
+        return NGX_ERROR;
+    }
+
+    if (setsockopt(s, SOL_SOCKET, SO_REUSEADDR,
+                   (const void *) &reuseaddr, sizeof(int))
+        == -1)
+    {
+        ngx_log_error(NGX_LOG_EMERG, cycle->log, ngx_socket_errno,
+                "setsockopt(SO_REUSEADDR) worker_socket failed");
+        goto sock_error;
+    }
+
+    if (!(ngx_event_flags & NGX_USE_AIO_EVENT)) {
+        if (ngx_nonblocking(s) == -1) {
+            ngx_log_error(NGX_LOG_EMERG, cycle->log, ngx_socket_errno,
+                          ngx_nonblocking_n " worker_socket failed");
+            return NGX_ERROR;
+        }
+    }
+
+    if (bind(s, sun, sizeof(*sun)) == -1) {
+        ngx_log_error(NGX_LOG_EMERG, cycle->log, ngx_socket_errno,
+                      ngx_nonblocking_n " worker_socket bind failed");
+        goto sock_error;
+    }
+
+    if (listen(s, NGX_LISTEN_BACKLOG) == -1) {
+        ngx_log_error(NGX_LOG_EMERG, cycle->log, ngx_socket_errno,
+                      "listen() to worker_socket, backlog %d failed",
+                      NGX_LISTEN_BACKLOG);
+        goto sock_error;
+    }
+
+    ls->fd = s;
+    ls->listen = 1;
+
+    return NGX_OK;
+
+sock_error:
+    if (s != (ngx_socket_t) -1
+        && ngx_close_socket(s) == -1) 
+    {
+        ngx_log_error(NGX_LOG_EMERG, cycle->log, ngx_socket_errno,
+                ngx_close_socket_n " worker_socket failed");
+    }
+    ngx_delete_file(sun->sun_path);
+
+    return NGX_ERROR;
+
+#else
+    return NGX_OK;
+#endif
+}
 
 
 static void *
@@ -482,18 +600,18 @@ ngx_rtmp_relay_publish(ngx_rtmp_session_t *s, ngx_rtmp_publish_t *v)
     size_t                          n;
     ngx_rtmp_relay_ctx_t           *ctx;
 
+    name.len = ngx_strlen(v->name);
+    name.data = v->name;
+
     ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_relay_module);
     if (ctx && ctx->relay) {
-        goto next;
+        goto no_pushes;
     }
 
     racf = ngx_rtmp_get_module_app_conf(s, ngx_rtmp_relay_module);
     if (racf == NULL || racf->pushes.nelts == 0) {
-        goto next;
+        goto no_pushes;
     }
-
-    name.len = ngx_strlen(v->name);
-    name.data = v->name;
 
     target = racf->pushes.elts;
     for (n = 0; n < racf->pushes.nelts; ++n, ++target) {
@@ -510,6 +628,64 @@ ngx_rtmp_relay_publish(ngx_rtmp_session_t *s, ngx_rtmp_publish_t *v)
             }
         }
     }
+
+no_pushes:
+
+#ifdef NGX_RTMP_AUTO_RELAY
+    {
+        ngx_int_t                   n;
+        ngx_rtmp_relay_target_t     at;
+        u_char                      path[sizeof("unix:") - 1 + NGX_MAX_PATH];
+        u_char                     *p;
+        ngx_str_t                  *u;
+        ngx_pid_t                   pid;
+
+        if (s->page_url.len == sizeof("ngx-auto-relay") - 1 &&
+            ngx_memcmp(s->page_url.data, "ngx-auto-relay", 
+                       s->page_url.len) == 0)
+        {
+            goto next;
+        }
+
+        ngx_memzero(&at, sizeof(at));
+
+        ngx_str_set(&at.page_url, "ngx-auto-relay");
+
+        for (n = 0; n < NGX_MAX_PROCESSES; ++n) {
+            if (n == ngx_process_slot) {
+                continue;
+            }
+
+            pid = ngx_processes[n].pid;
+            if (pid == 0 || pid == -1) {
+                continue;
+            }
+
+            u = &at.url.url;
+            p = ngx_snprintf(path, sizeof(path), 
+                             "unix:" NGX_RMP_RELAY_SOCK_PREFIX 
+                             "%i", (ngx_int_t) ngx_processes[n].pid);
+            u->data = path;
+            u->len = p - path;
+            /*TODO!*/
+            if (ngx_parse_url(s->connection->pool, &at.url) != NGX_OK) {
+                ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
+                        "relay: auto-relay parse_url failed url='%V' name='%V'",
+                        u, &name);
+                continue;
+            }
+
+            ngx_log_debug2(NGX_LOG_DEBUG_RTMP, s->connection->log, 0, 
+                    "relay: auto-relay url='%V' name='%V'", u, &name);
+
+            if (ngx_rtmp_relay_push(s, &name, &at) != NGX_OK) {
+                ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
+                        "relay: auto-relay push failed url='%V' name='%V'",
+                        u, &name);
+            }
+        }
+    }
+#endif
 
 next:
     return next_publish(s, v);
