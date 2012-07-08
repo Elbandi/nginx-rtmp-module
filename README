@@ -15,7 +15,7 @@ NGINX-based RTMP server
   (experimental; Linux only)
 
 * HLS (HTTP Live Streaming) support
-  (experimental; H264/AAC/MP3)
+  (experimental; libavformat >= 53.31.100)
 
 * HTTP callbacks on publish/play/record
 
