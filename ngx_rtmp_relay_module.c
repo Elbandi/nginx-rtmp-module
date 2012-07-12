@@ -26,7 +26,7 @@ static ngx_int_t ngx_rtmp_relay_publish(ngx_rtmp_session_t *s,
 #define NGX_RTMP_AUTO_RELAY
 
 
-#define NGX_RMP_RELAY_SOCK_PREFIX   "/tmp/nginx-rtmp."
+#define NGX_RTMP_RELAY_SOCK_PREFIX   "/tmp/nginx-rtmp."
 
 
 /*                _____
@@ -73,6 +73,7 @@ typedef struct {
     ngx_log_t                      *log;
     ngx_uint_t                      nbuckets;
     ngx_msec_t                      buflen;
+    ngx_flag_t                      auto_push;
     ngx_rtmp_relay_ctx_t          **ctx;
 } ngx_rtmp_relay_app_conf_t;
 
@@ -104,6 +105,13 @@ static ngx_command_t  ngx_rtmp_relay_commands[] = {
       ngx_rtmp_relay_push_pull,
       NGX_RTMP_APP_CONF_OFFSET,
       0,
+      NULL },
+
+    { ngx_string("auto_push"),
+      NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_flag_slot,
+      NGX_RTMP_APP_CONF_OFFSET,
+      offsetof(ngx_rtmp_relay_app_conf_t, auto_push),
       NULL },
 
     { ngx_string("relay_buffer"),
@@ -193,7 +201,7 @@ ngx_rtmp_relay_init_process(ngx_cycle_t *cycle)
     }
     sun->sun_family = AF_UNIX;
     *ngx_snprintf((u_char *) sun->sun_path, sizeof(sun->sun_path), 
-                 NGX_RMP_RELAY_SOCK_PREFIX "%i", (ngx_int_t)ngx_pid) = 0;
+                 NGX_RTMP_RELAY_SOCK_PREFIX "%i", (ngx_int_t)ngx_pid) = 0;
 
     ngx_str_set(&ls->addr_text, "worker_socket");
 
@@ -273,6 +281,7 @@ ngx_rtmp_relay_create_app_conf(ngx_conf_t *cf)
     racf->nbuckets = 1024;
     racf->log = &cf->cycle->new_log;
     racf->buflen = NGX_CONF_UNSET;
+    racf->auto_push = NGX_CONF_UNSET;
 
     return racf;
 }
@@ -288,6 +297,7 @@ ngx_rtmp_relay_merge_app_conf(ngx_conf_t *cf, void *parent, void *child)
             * conf->nbuckets);
 
     ngx_conf_merge_msec_value(conf->buflen, prev->buflen, 5000);
+    ngx_conf_merge_value(conf->auto_push, prev->auto_push, 0);
 
     return NGX_CONF_OK;
 }
@@ -600,39 +610,38 @@ ngx_rtmp_relay_publish(ngx_rtmp_session_t *s, ngx_rtmp_publish_t *v)
     size_t                          n;
     ngx_rtmp_relay_ctx_t           *ctx;
 
+    racf = ngx_rtmp_get_module_app_conf(s, ngx_rtmp_relay_module);
+    if (racf == NULL) {
+        goto next;
+    }
+
     name.len = ngx_strlen(v->name);
     name.data = v->name;
 
     ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_relay_module);
-    if (ctx && ctx->relay) {
-        goto no_pushes;
-    }
+    if (ctx == NULL || ctx->relay == 0) {
+        target = racf->pushes.elts;
 
-    racf = ngx_rtmp_get_module_app_conf(s, ngx_rtmp_relay_module);
-    if (racf == NULL || racf->pushes.nelts == 0) {
-        goto no_pushes;
-    }
-
-    target = racf->pushes.elts;
-    for (n = 0; n < racf->pushes.nelts; ++n, ++target) {
-        if (target->name.len == 0 
-            || (name.len == target->name.len
-                && !ngx_memcmp(name.data, target->name.data, name.len)))
-        {
-            if (ngx_rtmp_relay_push(s, &name, target) != NGX_OK) {
-                ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
-                        "relay: push failed name='%V' app='%V' "
-                        "playpath='%V' url='%V'",
-                        &name, &target->app, &target->play_path, 
-                        &target->url.url);
+        for (n = 0; n < racf->pushes.nelts; ++n, ++target) {
+            if (target->name.len == 0 
+                    || (name.len == target->name.len
+                        && !ngx_memcmp(name.data, target->name.data, 
+                                       name.len)))
+            {
+                if (ngx_rtmp_relay_push(s, &name, target) != NGX_OK) {
+                    ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
+                            "relay: push failed name='%V' app='%V' "
+                            "playpath='%V' url='%V'",
+                            &name, &target->app, &target->play_path, 
+                            &target->url.url);
+                }
             }
         }
     }
 
-no_pushes:
-
 #ifdef NGX_RTMP_AUTO_RELAY
-    {
+    if (racf->auto_push) {
+
         ngx_int_t                   n;
         ngx_rtmp_relay_target_t     at;
         u_char                      path[sizeof("unix:") - 1 + NGX_MAX_PATH];
@@ -648,7 +657,6 @@ no_pushes:
         }
 
         ngx_memzero(&at, sizeof(at));
-
         ngx_str_set(&at.page_url, "ngx-auto-relay");
 
         for (n = 0; n < NGX_MAX_PROCESSES; ++n) {
@@ -661,13 +669,13 @@ no_pushes:
                 continue;
             }
 
+            ngx_memzero(&at.url, sizeof(at.url));
             u = &at.url.url;
             p = ngx_snprintf(path, sizeof(path), 
-                             "unix:" NGX_RMP_RELAY_SOCK_PREFIX 
+                             "unix:" NGX_RTMP_RELAY_SOCK_PREFIX 
                              "%i", (ngx_int_t) ngx_processes[n].pid);
             u->data = path;
             u->len = p - path;
-            /*TODO!*/
             if (ngx_parse_url(s->connection->pool, &at.url) != NGX_OK) {
                 ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
                         "relay: auto-relay parse_url failed url='%V' name='%V'",
