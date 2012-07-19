@@ -372,6 +372,7 @@ ngx_rtmp_cmd_close_stream_init(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
 static ngx_int_t
 ngx_rtmp_cmd_close_stream(ngx_rtmp_session_t *s, ngx_rtmp_close_stream_t *v)
 {
+    // FIXME: need this?
     ngx_rtmp_send_user_stream_eof(s, NGX_RTMP_CMD_MSID);
 
     /* Whatever happens return OK
@@ -416,13 +417,11 @@ ngx_rtmp_cmd_delete_stream_init(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
 static ngx_int_t
 ngx_rtmp_cmd_delete_stream(ngx_rtmp_session_t *s, ngx_rtmp_delete_stream_t *v)
 {
-    ngx_rtmp_close_stream_t         cv;
+    ngx_rtmp_send_user_stream_eof(s, NGX_RTMP_CMD_MSID);
 
-    /* chain close_stream */
-    cv.stream = 0;
-    return ngx_rtmp_close_stream
-        ? ngx_rtmp_close_stream(s, &cv)
-        : NGX_OK;
+    /* Whatever happens return OK
+     * since we should be careful with destruction */
+    return NGX_OK;
 }
 
 
