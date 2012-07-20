@@ -457,6 +457,7 @@ ngx_rtmp_exec_publish(ngx_rtmp_session_t *s, ngx_rtmp_publish_t *v)
     ngx_rtmp_exec_app_conf_t       *eacf;
     ngx_rtmp_exec_conf_t           *ec;
     ngx_rtmp_exec_ctx_t            *ctx;
+    ngx_rtmp_exec_t                *e;
     size_t                          n;
 
     eacf = ngx_rtmp_get_module_app_conf(s, ngx_rtmp_exec_module);
@@ -481,7 +482,18 @@ ngx_rtmp_exec_publish(ngx_rtmp_session_t *s, ngx_rtmp_publish_t *v)
 
     ec = eacf->execs.elts;
     for (n = 0; n < eacf->execs.nelts; ++n, ++ec) {
-        ngx_rtmp_exec_run(s, n);
+        /*
+         * ffmpeg has (?) a bug: if it started before he has a valid stream, it's freezed
+         * and eat the cpu. So we start the exec delayed, so the source stream could be valid
+         */
+        e = ctx->execs + n;
+        e->session = s;
+        e->index = n;
+
+        e->respawn_evt.data = e;
+        e->respawn_evt.log = s->connection->log;
+        e->respawn_evt.handler = ngx_rtmp_exec_respawn;
+        ngx_add_timer(&e->respawn_evt, eacf->respawn_timeout);
     }
 
 next:
