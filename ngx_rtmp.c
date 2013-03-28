@@ -317,6 +317,7 @@ ngx_rtmp_merge_applications(ngx_conf_t *cf, ngx_array_t *applications,
     ngx_rtmp_conf_ctx_t            *ctx, saved;
     ngx_rtmp_core_app_conf_t      **cacfp;
     ngx_uint_t                      n;
+    ngx_rtmp_core_app_conf_t       *cacf;
 
     if (applications == NULL) {
         return NGX_CONF_OK;
@@ -332,6 +333,14 @@ ngx_rtmp_merge_applications(ngx_conf_t *cf, ngx_array_t *applications,
 
         rv = module->merge_app_conf(cf, app_conf[ctx_index],
                 (*cacfp)->app_conf[ctx_index]);
+        if (rv != NGX_CONF_OK) {
+            return rv;
+        }
+
+        cacf = (*cacfp)->app_conf[ngx_rtmp_core_module.ctx_index];
+        rv = ngx_rtmp_merge_applications(cf, &cacf->applications, 
+                                         (*cacfp)->app_conf,
+                                         module, ctx_index);
         if (rv != NGX_CONF_OK) {
             return rv;
         }
@@ -407,6 +416,10 @@ ngx_rtmp_init_event_handlers(ngx_conf_t *cf, ngx_rtmp_core_main_conf_t *cmcf)
     /* init user protocol events */
     eh = ngx_array_push(&cmcf->events[NGX_RTMP_MSG_USER]);
     *eh = ngx_rtmp_user_message_handler;
+
+    /* aggregate to audio/video map */
+    eh = ngx_array_push(&cmcf->events[NGX_RTMP_MSG_AGGREGATE]);
+    *eh = ngx_rtmp_aggregate_message_handler;
 
     /* init amf callbacks */
     ngx_array_init(&cmcf->amf_arrays, cf->pool, 1, sizeof(ngx_hash_key_t));

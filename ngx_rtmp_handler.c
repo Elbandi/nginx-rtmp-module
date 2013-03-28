@@ -10,9 +10,10 @@
 static void ngx_rtmp_recv(ngx_event_t *rev);
 static void ngx_rtmp_send(ngx_event_t *rev);
 static void ngx_rtmp_ping(ngx_event_t *rev);
-static ngx_int_t ngx_rtmp_receive_message(ngx_rtmp_session_t *s,
-       ngx_rtmp_header_t *h, ngx_chain_t *in);
 static ngx_int_t ngx_rtmp_finalize_set_chunk_size(ngx_rtmp_session_t *s);
+
+
+ngx_uint_t                  ngx_rtmp_naccepted;
 
 
 ngx_rtmp_bandwidth_t        ngx_rtmp_bw_out;
@@ -64,6 +65,7 @@ ngx_rtmp_user_message_type(uint16_t evt)
         "stream dry",
         "set_buflen",
         "recorded",
+        "",
         "ping_request",
         "ping_response",
     };
@@ -164,12 +166,17 @@ ngx_rtmp_ping(ngx_event_t *pev)
         return;
     }
 
+    if (cscf->busy) {
+        ngx_log_error(NGX_LOG_INFO, c->log, 0, 
+                "ping: not busy between pings");
+        ngx_rtmp_finalize_session(s);
+        return;
+    }
+
     ngx_log_debug1(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
             "ping: schedule %Mms", cscf->ping_timeout);
 
-    if (ngx_rtmp_send_user_ping_request(s, (uint32_t)ngx_current_msec) 
-            != NGX_OK)
-    {
+    if (ngx_rtmp_send_ping_request(s, (uint32_t)ngx_current_msec) != NGX_OK) {
         ngx_rtmp_finalize_session(s);
         return;
     }
@@ -192,7 +199,7 @@ ngx_rtmp_recv(ngx_event_t *rev)
     ngx_buf_t                  *b;
     u_char                     *p, *pp, *old_pos;
     size_t                      size, fsize, old_size;
-    uint8_t                     fmt;
+    uint8_t                     fmt, ext;
     uint32_t                    csid, timestamp;
 
     c = rev->data;
@@ -262,7 +269,7 @@ ngx_rtmp_recv(ngx_event_t *rev)
             b->last += n;
             s->in_bytes += n;
 
-            if (s->in_bytes - s->in_last_ack >= cscf->ack_window) {
+            if (s->ack_size && s->in_bytes - s->in_last_ack >= s->ack_size) {
                 
                 s->in_last_ack = s->in_bytes;
 
@@ -333,6 +340,7 @@ ngx_rtmp_recv(ngx_event_t *rev)
                 h->csid = csid;
             }
 
+            ext = st->ext;
             timestamp = st->dtime;
             if (fmt <= 2 ) {
                 if (b->last - p < 3)
@@ -344,6 +352,8 @@ ngx_rtmp_recv(ngx_event_t *rev)
                 pp[1] = *p++;
                 pp[0] = *p++;
                 pp[3] = 0;
+
+                ext = (timestamp == 0x00ffffff);
 
                 if (fmt <= 1) {
                     if (b->last - p < 4)
@@ -374,24 +384,23 @@ ngx_rtmp_recv(ngx_event_t *rev)
             }
 
             /* extended header */
-            if (timestamp >= 0x00ffffff) {
+            if (ext) {
+                if (b->last - p < 4)
+                    continue;
+                pp = (u_char*)&timestamp;
+                pp[3] = *p++;
+                pp[2] = *p++;
+                pp[1] = *p++;
+                pp[0] = *p++;
+            }
+
+            if (st->len == 0) {
                 /* Messages with type=3 should
                  * never have ext timestamp field
                  * according to standard.
                  * However that's not always the case
                  * in real life */
-                if (fmt <= 2 || cscf->publish_time_fix) {
-                    if (b->last - p < 4)
-                        continue;
-                    pp = (u_char*)&timestamp;
-                    pp[3] = *p++;
-                    pp[2] = *p++;
-                    pp[1] = *p++;
-                    pp[0] = *p++;
-                }
-            }
-
-            if (st->len == 0) {
+                st->ext = (ext && cscf->publish_time_fix);
                 if (fmt) {
                     st->dtime = timestamp;
                 } else {
@@ -515,6 +524,7 @@ ngx_rtmp_send(ngx_event_t *wev)
             return;
         }
 
+        s->out_bytes += n;
         s->ping_reset = 1;
         ngx_rtmp_update_bandwidth(&ngx_rtmp_bw_out, n);
         s->out_bpos += n;
@@ -578,7 +588,7 @@ ngx_rtmp_prepare_message(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
     fmt = 0;
     if (lh && lh->csid && h->msid == lh->msid) {
         ++fmt;
-        if (h->type == lh->type && mlen == lh->mlen) {
+        if (h->type == lh->type && mlen && mlen == lh->mlen) {
             ++fmt;
             if (h->timestamp == lh->timestamp) {
                 ++fmt;
@@ -589,10 +599,10 @@ ngx_rtmp_prepare_message(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
         timestamp = h->timestamp;
     }
 
-    if (lh) {
+    /*if (lh) {
         *lh = *h;
         lh->mlen = mlen;
-    }
+    }*/
 
     hsize = hdrsize[fmt];
 
@@ -694,9 +704,13 @@ ngx_rtmp_send_message(ngx_rtmp_session_t *s, ngx_chain_t *out,
 
     nmsg = (s->out_last - s->out_pos) % s->out_queue + 1;
 
+    if (priority > 3) {
+        priority = 3;
+    }
+
     /* drop packet? 
      * Note we always leave 1 slot free */
-    if (nmsg + priority * s->out_queue / 16 >= s->out_queue) {
+    if (nmsg + priority * s->out_queue / 4 >= s->out_queue) {
         ngx_log_debug2(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
                 "RTMP drop message bufs=%ui, priority=%ui",
                 nmsg, priority);
@@ -725,7 +739,7 @@ ngx_rtmp_send_message(ngx_rtmp_session_t *s, ngx_chain_t *out,
 }
 
 
-static ngx_int_t 
+ngx_int_t 
 ngx_rtmp_receive_message(ngx_rtmp_session_t *s,
         ngx_rtmp_header_t *h, ngx_chain_t *in)
 {
@@ -753,7 +767,7 @@ ngx_rtmp_receive_message(ngx_rtmp_session_t *s,
     }
 #endif
 
-    if (h->type >= NGX_RTMP_MSG_MAX) {
+    if (h->type > NGX_RTMP_MSG_MAX) {
         ngx_log_debug1(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
                 "unexpected RTMP message type: %d", (int)h->type);
         return NGX_OK;

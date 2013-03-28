@@ -2,34 +2,50 @@
 ## nginx-rtmp-module
 
 
-### Project page:
+### Project blog
 
-  http://arut.github.com/nginx-rtmp-module
+  http://rarut.wordpress.com
 
-### Wiki manual:
+### Wiki manual
 
-  https://github.com/arut/nginx-rtmp-module/wiki
+  https://github.com/arut/nginx-rtmp-module/wiki/Directives
 
-### Features:
+### Google group
+
+  https://groups.google.com/group/nginx-rtmp
+
+  https://groups.google.com/group/nginx-rtmp-ru (Russian)
+
+
+### Project page at github
+
+  Project features, examples, donation information
+
+  http://arut.github.com/nginx-rtmp-module/
+
+### Features
 
 * Live streaming of video/audio
 
-* Video on demand FLV/MP4
+* Video on demand FLV/MP4,
+  playing from local filesystem or HTTP
 
 * Stream relay support for distributed
   streaming: push & pull models
 
-* Recording published streams in FLV file
+* Recording streams in multiple FLVs
 
 * H264/AAC support
 
 * Online transcoding with FFmpeg
 
-* HLS (HTTP Live Streaming) support;
-  experimental; requires recent libavformat 
-  (>= 53.31.100) from ffmpeg (ffmpeg.org)
+* HLS (HTTP Live Streaming) support
 
-* HTTP callbacks on publish/play/record
+* HTTP callbacks (publish/play/record/update etc)
+
+* Running external programs on certain events (exec)
+
+* HTTP control module for recording audio/video and dropping clients
 
 * Advanced buffering techniques
   to keep memory allocations at a minimum
@@ -44,8 +60,10 @@
 * Statistics in XML/XSL in machine- & human-
   readable form
 
+* Linux/FreeBSD/MacOS
 
-### Build:
+
+### Build
 
 cd to NGINX source directory & run this:
 
@@ -53,8 +71,11 @@ cd to NGINX source directory & run this:
     make
     make install
 
+See this article about building nginx-rtmp with HLS support:
+https://github.com/arut/nginx-rtmp-module/wiki/Building-nginx-rtmp-with-HLS-support
 
-### RTMP URL format:
+
+### RTMP URL format
 
     rtmp://rtmp.example.com/app[/name]
 
@@ -73,7 +94,7 @@ to nginx workers. This option is toggled with
 rtmp_auto_push directive.
 
 
-### Example nginx.conf:
+### Example nginx.conf
 
     rtmp {
 
@@ -120,12 +141,19 @@ rtmp_auto_push directive.
                 #
                 # Multiple exec lines can be specified.
 
-                exec /usr/bin/ffmpeg -re -i rtmp://localhost:1935/$app/$name -vcodec flv -acodec copy -s 32x32 -f flv rtmp://localhost:1935/small/${name};
+                exec ffmpeg -re -i rtmp://localhost:1935/$app/$name -vcodec flv -acodec copy -s 32x32 -f flv rtmp://localhost:1935/small/${name};
             }
 
             application small {
                 live on;
                 # Video with reduced resolution comes here from ffmpeg
+            }
+
+            application webcam {
+                live on;
+
+                # Stream from local webcam
+                exec_static ffmpeg -f video4linux2 -i /dev/video0 -c:v libx264 -an -f flv rtmp://localhost:1935/webcam/mystream;
             }
 
             application mypush {
@@ -144,6 +172,13 @@ rtmp_auto_push directive.
                 # Pull all streams from remote machine
                 # and play locally
                 pull rtmp://rtmp3.example.com pageUrl=www.example.com/index.html;
+            }
+            
+            application mystaticpull {
+                live on;
+
+                # Static pull is started at nginx start
+                pull rtmp://rtmp4.example.com pageUrl=www.example.com/index.html name=mystream static;
             }
 
             # video on demand
@@ -197,11 +232,7 @@ rtmp_auto_push directive.
             }
 
 
-            # HLS (experimental)
-
-            # HLS requires libavformat & should be configured as a separate
-            # NGINX module in addition to nginx-rtmp-module:
-            # ./configure ... --add-module=/path/to/nginx-rtmp-module/hls ...
+            # HLS
 
             # For HLS to work please create a directory in tmpfs (/tmp/app here)
             # for the fragments. The directory contents is served via HTTP (see
@@ -218,6 +249,7 @@ rtmp_auto_push directive.
             # If you need to transcode live stream use 'exec' feature.
             #
             application hls {
+                live on;
                 hls on;
                 hls_path /tmp/app;
                 hls_fragment 5s;
@@ -251,15 +283,19 @@ rtmp_auto_push directive.
 
             location /hls {
                 # Serve HLS fragments
+                types {
+                    application/vnd.apple.mpegurl m3u8;
+                }
                 alias /tmp/app;
+                expires -1;
             }
 
         }
     }
 
 
+### Multi-worker streaming example
 
-    # Multi-worker streaming
     rtmp_auto_push on;
 
     rtmp {

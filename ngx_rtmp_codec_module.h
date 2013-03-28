@@ -55,21 +55,15 @@ typedef struct {
     ngx_uint_t                  video_codec_id;
     ngx_uint_t                  audio_data_rate;
     ngx_uint_t                  audio_codec_id;
+    ngx_uint_t                  aac_sample_rate;
     ngx_uint_t                  sample_rate;    /* 5512, 11025, 22050, 44100 */
     ngx_uint_t                  sample_size;    /* 1=8bit, 2=16bit */
     ngx_uint_t                  audio_channels; /* 1, 2 */
     u_char                      profile[32];
     u_char                      level[32];
 
-    ngx_uint_t                  avc_version;
-    ngx_uint_t                  aac_version;
-
     ngx_chain_t                *avc_header;
     ngx_chain_t                *aac_header;
-
-    /* prepared headers (for live streaming) */
-    ngx_chain_t                *avc_pheader;
-    ngx_chain_t                *aac_pheader;
 
     ngx_chain_t                *meta;
     ngx_uint_t                  meta_version;

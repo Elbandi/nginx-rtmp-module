@@ -36,7 +36,8 @@
             <th>Time</th>
         </tr>
         <tr>
-            <td colspan="2"/>
+            <td>@<xsl:value-of select="naccepted"/></td>
+            <td/>
             <td><xsl:value-of select="in"/></td>
             <td><xsl:value-of select="out"/></td>
             <td><xsl:value-of select="round(bwin div 1024)"/></td>
@@ -78,7 +79,13 @@
 </xsl:template>
 
 <xsl:template match="stream">
-    <tr valign="top" bgcolor="#cccccc">
+    <tr valign="top">
+        <xsl:attribute name="bgcolor">
+            <xsl:choose>
+                <xsl:when test="active">#cccccc</xsl:when>
+                <xsl:otherwise>#dddddd</xsl:otherwise>
+            </xsl:choose>
+        </xsl:attribute>
         <td>
             <a href="">
                 <xsl:attribute name="onclick">
@@ -105,7 +112,7 @@
             <xsl:apply-templates select="meta/level"/>
         </td>
         <td><xsl:value-of select="meta/audio"/></td>
-        <td> <xsl:apply-templates select="publishing"/> </td>
+        <td><xsl:call-template name="streamstate"/></td>
         <td>
             <xsl:call-template name="showtime">
                <xsl:with-param name="time" select="time"/>
@@ -116,9 +123,10 @@
         <xsl:attribute name="id">
             <xsl:value-of select="../../name"/>-<xsl:value-of select="name"/>
         </xsl:attribute>
-        <td colspan="7" ngcolor="#eeeeee">
+        <td colspan="12" ngcolor="#eeeeee">
             <table cellspacing="1" cellpadding="5">
                 <tr>
+                    <th>Id</th>
                     <th>State</th>
                     <th>Address</th>
                     <th>Flash version</th>
@@ -157,9 +165,32 @@
 </xsl:template>
 
 
+<xsl:template name="streamstate">
+    <xsl:choose>
+        <xsl:when test="active">active</xsl:when>
+        <xsl:otherwise>idle</xsl:otherwise>
+    </xsl:choose>
+</xsl:template>
+
+
+<xsl:template name="clientstate">
+    <xsl:choose>
+        <xsl:when test="publishing">publishing</xsl:when>
+        <xsl:otherwise>playing</xsl:otherwise>
+    </xsl:choose>
+</xsl:template>
+
+
 <xsl:template match="client">
-    <tr bgcolor="#eeeeee">
-        <td><xsl:apply-templates select="publishing"/></td>
+    <tr>
+        <xsl:attribute name="bgcolor">
+            <xsl:choose>
+                <xsl:when test="publishing">#cccccc</xsl:when>
+                <xsl:otherwise>#eeeeee</xsl:otherwise>
+            </xsl:choose>
+        </xsl:attribute>
+        <td><xsl:value-of select="id"/></td>
+        <td><xsl:call-template name="clientstate"/></td>
         <td><xsl:value-of select="address"/></td>
         <td><xsl:value-of select="flashver"/></td>
         <td>
@@ -183,6 +214,10 @@
 
 <xsl:template match="publishing">
     publishing
+</xsl:template>
+
+<xsl:template match="active">
+    active
 </xsl:template>
 
 <xsl:template match="profile">

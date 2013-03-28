@@ -1,17 +1,15 @@
-- Auto-pushing pulled stream
+- HLS monotonical dts
 
-- Pull secondary address support
+- total client counter
 
-- Binary search in play module
+- improve session epoch variable
 
-- More Wiki docs
+- fix auto-pushing to cache manager
 
+- HDS
 
-Style:
-======
+- DNS round-robin url
 
-- Move out & merge stream ids from live & cmd modules
+- multiple streams per connection
 
-- Clean cmd module:
-  * make shortcuts for status messages
-  * move protocol message sending to live/play modules
+- VOD HLS
