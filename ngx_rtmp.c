@@ -6,6 +6,7 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_event.h>
+#include <nginx.h>
 #include "ngx_rtmp.h"
 
 
@@ -27,6 +28,9 @@ static ngx_int_t ngx_rtmp_init_event_handlers(ngx_conf_t *cf,
 static char * ngx_rtmp_merge_applications(ngx_conf_t *cf, 
         ngx_array_t *applications, void **app_conf, ngx_rtmp_module_t *module, 
         ngx_uint_t ctx_index);
+
+
+ngx_thread_volatile ngx_event_t    *ngx_rtmp_init_queue;
 
 
 ngx_uint_t  ngx_rtmp_max_module;
@@ -682,7 +686,11 @@ ngx_rtmp_add_addrs(ngx_conf_t *cf, ngx_rtmp_port_t *mport,
 
         addrs[i].conf.ctx = addr[i].ctx;
 
-        len = ngx_sock_ntop(addr[i].sockaddr, buf, NGX_SOCKADDR_STRLEN, 1);
+        len = ngx_sock_ntop(addr[i].sockaddr,
+#if (nginx_version >= 1005003)
+                            addr[i].socklen,
+#endif
+                            buf, NGX_SOCKADDR_STRLEN, 1);
 
         p = ngx_pnalloc(cf->pool, len);
         if (p == NULL) {
@@ -727,7 +735,11 @@ ngx_rtmp_add_addrs6(ngx_conf_t *cf, ngx_rtmp_port_t *mport,
 
         addrs6[i].conf.ctx = addr[i].ctx;
 
-        len = ngx_sock_ntop(addr[i].sockaddr, buf, NGX_SOCKADDR_STRLEN, 1);
+        len = ngx_sock_ntop(addr[i].sockaddr,
+#if (nginx_version >= 1005003)
+                            addr[i].socklen,
+#endif
+                            buf, NGX_SOCKADDR_STRLEN, 1);
 
         p = ngx_pnalloc(cf->pool, len);
         if (p == NULL) {

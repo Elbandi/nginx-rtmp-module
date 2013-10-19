@@ -3,6 +3,8 @@
  */
 
 
+#include <ngx_config.h>
+#include <ngx_core.h>
 #include "ngx_rtmp.h"
 
 #include <openssl/hmac.h>
@@ -182,7 +184,7 @@ static void
 ngx_rtmp_fill_random_buffer(ngx_buf_t *b)
 {
     for (; b->last != b->end; ++b->last) {
-        *b->last = rand();
+        *b->last = (u_char) rand();
     }
 }
 
@@ -609,7 +611,10 @@ ngx_rtmp_client_handshake(ngx_rtmp_session_t *s, unsigned async)
     }
 
     if (async) {
-        ngx_post_event(c->write, &ngx_posted_events);
+        ngx_add_timer(c->write, s->timeout);
+        if (ngx_handle_write_event(c->write, 0) != NGX_OK) {
+            ngx_rtmp_finalize_session(s);
+        }
         return;
     }
 

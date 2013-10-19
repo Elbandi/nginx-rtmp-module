@@ -3,6 +3,8 @@
  */
 
 
+#include <ngx_config.h>
+#include <ngx_core.h>
 #include "ngx_rtmp.h"
 #include "ngx_rtmp_amf.h"
 #include "ngx_rtmp_cmd_module.h"
@@ -189,7 +191,6 @@ ngx_rtmp_user_message_handler(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
 
                 return ngx_rtmp_recorded(s, &v);
             }
-            break;
 
         case NGX_RTMP_USER_PING_REQUEST:
             return ngx_rtmp_send_ping_response(s, val);
@@ -208,8 +209,6 @@ ngx_rtmp_user_message_handler(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
 
             return NGX_OK;
     }
-
-    return NGX_OK;
 }
 
 

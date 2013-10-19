@@ -3,6 +3,8 @@
  */
 
 
+#include <ngx_config.h>
+#include <ngx_core.h>
 #include "ngx_rtmp_cmd_module.h"
 #include "ngx_rtmp_relay_module.h"
 
@@ -15,10 +17,12 @@ static ngx_int_t ngx_rtmp_auto_push_init_process(ngx_cycle_t *cycle);
 static void ngx_rtmp_auto_push_exit_process(ngx_cycle_t *cycle);
 static void * ngx_rtmp_auto_push_create_conf(ngx_cycle_t *cf);
 static char * ngx_rtmp_auto_push_init_conf(ngx_cycle_t *cycle, void *conf);
+#if (NGX_HAVE_UNIX_DOMAIN)
 static ngx_int_t ngx_rtmp_auto_push_publish(ngx_rtmp_session_t *s, 
-        ngx_rtmp_publish_t *v);
+       ngx_rtmp_publish_t *v);
 static ngx_int_t ngx_rtmp_auto_push_delete_stream(ngx_rtmp_session_t *s, 
-        ngx_rtmp_delete_stream_t *v);
+       ngx_rtmp_delete_stream_t *v);
+#endif
 
 
 typedef struct ngx_rtmp_auto_push_ctx_s ngx_rtmp_auto_push_ctx_t;
@@ -269,7 +273,7 @@ ngx_rtmp_auto_push_create_conf(ngx_cycle_t *cycle)
     }
 
     apcf->auto_push = NGX_CONF_UNSET;
-    apcf->push_reconnect = NGX_CONF_UNSET;
+    apcf->push_reconnect = NGX_CONF_UNSET_MSEC;
 
     return apcf;
 }
@@ -291,6 +295,7 @@ ngx_rtmp_auto_push_init_conf(ngx_cycle_t *cycle, void *conf)
 }
 
 
+#if (NGX_HAVE_UNIX_DOMAIN)
 static void
 ngx_rtmp_auto_push_reconnect(ngx_event_t *ev)
 {
@@ -303,12 +308,15 @@ ngx_rtmp_auto_push_reconnect(ngx_event_t *ev)
     ngx_rtmp_relay_target_t         at;
     u_char                          path[sizeof("unix:") + NGX_MAX_PATH];
     u_char                          flash_ver[sizeof("APSH ,") +
-                                              NGX_OFF_T_LEN * 2];
+                                              NGX_INT_T_LEN * 2];
     u_char                          play_path[NGX_RTMP_MAX_NAME];
     ngx_str_t                       name;
     u_char                         *p;
     ngx_str_t                      *u;
     ngx_pid_t                       pid;
+    ngx_int_t                       npushed;
+    ngx_core_conf_t                *ccf;
+    ngx_file_info_t                 fi;
 
     ngx_log_debug0(NGX_LOG_DEBUG_RTMP, s->connection->log, 0, 
                    "auto_push: reconnect");
@@ -335,6 +343,7 @@ ngx_rtmp_auto_push_reconnect(ngx_event_t *ev)
     }
 
     slot = ctx->slots;
+    npushed = 0;
 
     for (n = 0; n < NGX_MAX_PROCESSES; ++n, ++slot) {
         if (n == ngx_process_slot) {
@@ -347,6 +356,7 @@ ngx_rtmp_auto_push_reconnect(ngx_event_t *ev)
         }
 
         if (*slot) {
+            npushed++;
             continue;
         }
 
@@ -358,6 +368,15 @@ ngx_rtmp_auto_push_reconnect(ngx_event_t *ev)
                          "unix:%V/" NGX_RTMP_AUTO_PUSH_SOCKNAME ".%i", 
                          &apcf->socket_dir, n);
         *p = 0;
+
+        if (ngx_file_info(path + sizeof("unix:") - 1, &fi) != NGX_OK) {
+            ngx_log_debug5(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+                           "auto_push: " ngx_file_info_n " failed: "
+                           "slot=%i pid=%P socket='%s'" "url='%V' name='%s'",
+                           n, pid, path, u, ctx->name);
+            continue;
+        }
+
         u->data = path;
         u->len = p - path;
         if (ngx_parse_url(s->connection->pool, &at.url) != NGX_OK) {
@@ -374,23 +393,53 @@ ngx_rtmp_auto_push_reconnect(ngx_event_t *ev)
         at.flash_ver.len = p - flash_ver;
 
         ngx_log_debug4(NGX_LOG_DEBUG_RTMP, s->connection->log, 0, 
-                       "auto_push: connect slot=%i pid=%i socket='%s' "
-                       "name='%s'",
-                       n, (ngx_int_t) pid, path, ctx->name);
+                       "auto_push: connect slot=%i pid=%P socket='%s' name='%s'",
+                       n, pid, path, ctx->name);
 
         if (ngx_rtmp_relay_push(s, &name, &at) == NGX_OK) {
             *slot = 1;
+            npushed++;
+            continue;
+        }
+
+        ngx_log_debug5(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+                      "auto_push: connect failed: slot=%i pid=%P socket='%s'"
+                      "url='%V' name='%s'",
+                      n, pid, path, u, ctx->name);
+    }
+
+    ccf = (ngx_core_conf_t *) ngx_get_conf(ngx_cycle->conf_ctx,
+                                           ngx_core_module);
+
+    ngx_log_debug3(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+                   "auto_push: pushed=%i total=%i failed=%i",
+                   npushed, ccf->worker_processes,
+                   ccf->worker_processes - 1 - npushed);
+
+    if (ccf->worker_processes == npushed + 1) {
+        return;
+    }
+
+    /* several workers failed */
+
+    slot = ctx->slots;
+
+    for (n = 0; n < NGX_MAX_PROCESSES; ++n, ++slot) {
+        pid = ngx_processes[n].pid;
+
+        if (n == ngx_process_slot || *slot == 1 ||
+            pid == 0 || pid == NGX_INVALID_PID)
+        {
             continue;
         }
 
         ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
-                      "auto_push: connect failed: slot=%i pid=%i socket='%s'"
-                      "url='%V' name='%s'",
-                      n, (ngx_int_t) pid, path, u, ctx->name);
+                      "auto_push: connect failed: slot=%i pid=%P name='%s'",
+                      n, pid, ctx->name);
+    }
 
-        if (!ctx->push_evt.timer_set) {
-            ngx_add_timer(&ctx->push_evt, apcf->push_reconnect);
-        }
+    if (!ctx->push_evt.timer_set) {
+        ngx_add_timer(&ctx->push_evt, apcf->push_reconnect);
     }
 }
 
@@ -497,3 +546,4 @@ ngx_rtmp_auto_push_delete_stream(ngx_rtmp_session_t *s,
 next:
     return next_delete_stream(s, v);
 }
+#endif /* NGX_HAVE_UNIX_DOMAIN */

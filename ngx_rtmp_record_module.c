@@ -188,14 +188,14 @@ ngx_rtmp_record_create_app_conf(ngx_conf_t *cf)
         return NULL;
     }
 
-    racf->max_size   = NGX_CONF_UNSET;
-    racf->max_frames = NGX_CONF_UNSET;
-    racf->interval   = NGX_CONF_UNSET;
-    racf->unique     = NGX_CONF_UNSET;
-    racf->append     = NGX_CONF_UNSET;
-    racf->lock_file  = NGX_CONF_UNSET;
-    racf->notify     = NGX_CONF_UNSET;
-    racf->url        = NGX_CONF_UNSET_PTR;
+    racf->max_size = NGX_CONF_UNSET_SIZE;
+    racf->max_frames = NGX_CONF_UNSET_SIZE;
+    racf->interval = NGX_CONF_UNSET_MSEC;
+    racf->unique = NGX_CONF_UNSET;
+    racf->append = NGX_CONF_UNSET;
+    racf->lock_file = NGX_CONF_UNSET;
+    racf->notify = NGX_CONF_UNSET;
+    racf->url = NGX_CONF_UNSET_PTR;
 
     if (ngx_array_init(&racf->rec, cf->pool, 1, sizeof(void *)) != NGX_OK) {
         return NULL;
@@ -371,6 +371,7 @@ ngx_rtmp_record_make_path(ngx_rtmp_session_t *s,
     ngx_rtmp_record_ctx_t          *ctx;
     ngx_rtmp_record_app_conf_t     *rracf;
     u_char                         *p, *l;
+    struct tm                       tm;
 
     static u_char                   buf[NGX_TIME_T_LEN + 1];
     static u_char                   pbuf[NGX_MAX_PATH + 1];
@@ -395,10 +396,15 @@ ngx_rtmp_record_make_path(ngx_rtmp_session_t *s,
                        rctx->timestamp) - buf, l - p));
     }
 
-    p = ngx_cpymem(p, rracf->suffix.data, 
-                   ngx_min(rracf->suffix.len, (size_t)(l - p)));
-    *p = 0;
+    if (ngx_strchr(rracf->suffix.data, '%')) {
+        ngx_libc_localtime(rctx->timestamp, &tm);
+        p += strftime((char *) p, l - p, (char *) rracf->suffix.data, &tm);
+    } else {
+        p = ngx_cpymem(p, rracf->suffix.data, 
+                ngx_min(rracf->suffix.len, (size_t)(l - p)));
+    }
 
+    *p = 0;
     path->data = pbuf;
     path->len  = p - pbuf;
 
@@ -437,6 +443,7 @@ ngx_rtmp_record_node_open(ngx_rtmp_session_t *s,
     uint32_t                    tag_size, mlen, timestamp;
 
     rracf = rctx->conf;
+    tag_size = 0;
 
     if (rctx->file.fd != NGX_INVALID_FILE) {
         return NGX_AGAIN;
@@ -476,6 +483,7 @@ ngx_rtmp_record_node_open(ngx_rtmp_session_t *s,
         return NGX_OK;
     }
 
+#if !(NGX_WIN32)
     if (rracf->lock_file) {
         err = ngx_lock_fd(rctx->file.fd);
         if (err) {
@@ -483,6 +491,7 @@ ngx_rtmp_record_node_open(ngx_rtmp_session_t *s,
                           "record: %V lock failed", &rracf->id);
         }
     }
+#endif
 
     ngx_log_debug2(NGX_LOG_DEBUG_RTMP, s->connection->log, 0, 
                    "record: %V opened '%V'", &rracf->id, &path);
@@ -497,7 +506,19 @@ ngx_rtmp_record_node_open(ngx_rtmp_session_t *s,
         file_size = 0;
         timestamp = 0;
 
+#if (NGX_WIN32)
+        {
+            LONG  lo, hi;
+
+            lo = 0;
+            hi = 0;
+            lo = SetFilePointer(rctx->file.fd, lo, &hi, FILE_END);
+            file_size = (lo == INVALID_SET_FILE_POINTER ?
+                         (off_t) -1 : (off_t) hi << 32 | (off_t) lo);
+        }
+#else
         file_size = lseek(rctx->file.fd, 0, SEEK_END);
+#endif
         if (file_size == (off_t) -1) {
             ngx_log_error(NGX_LOG_CRIT, s->connection->log, ngx_errno,
                           "record: %V seek failed", &rracf->id);

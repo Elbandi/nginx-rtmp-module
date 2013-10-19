@@ -3,6 +3,8 @@
  */
 
 
+#include <ngx_config.h>
+#include <ngx_core.h>
 #include "ngx_rtmp_live_module.h"
 #include "ngx_rtmp_cmd_module.h"
 #include "ngx_rtmp_codec_module.h"
@@ -33,13 +35,6 @@ static ngx_command_t  ngx_rtmp_live_commands[] = {
       ngx_conf_set_flag_slot,
       NGX_RTMP_APP_CONF_OFFSET,
       offsetof(ngx_rtmp_live_app_conf_t, live),
-      NULL },
-
-    { ngx_string("meta"),
-      NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_flag_slot,
-      NGX_RTMP_APP_CONF_OFFSET,
-      offsetof(ngx_rtmp_live_app_conf_t, meta),
       NULL },
 
     { ngx_string("stream_buckets"),
@@ -148,11 +143,10 @@ ngx_rtmp_live_create_app_conf(ngx_conf_t *cf)
     }
 
     lacf->live = NGX_CONF_UNSET;
-    lacf->meta = NGX_CONF_UNSET;
     lacf->nbuckets = NGX_CONF_UNSET;
-    lacf->buflen = NGX_CONF_UNSET;
-    lacf->sync = NGX_CONF_UNSET;
-    lacf->idle_timeout = NGX_CONF_UNSET;
+    lacf->buflen = NGX_CONF_UNSET_MSEC;
+    lacf->sync = NGX_CONF_UNSET_MSEC;
+    lacf->idle_timeout = NGX_CONF_UNSET_MSEC;
     lacf->interleave = NGX_CONF_UNSET;
     lacf->wait_key = NGX_CONF_UNSET;
     lacf->wait_video = NGX_CONF_UNSET;
@@ -170,7 +164,6 @@ ngx_rtmp_live_merge_app_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_rtmp_live_app_conf_t *conf = child;
 
     ngx_conf_merge_value(conf->live, prev->live, 0);
-    ngx_conf_merge_value(conf->meta, prev->meta, 1);
     ngx_conf_merge_value(conf->nbuckets, prev->nbuckets, 1024);
     ngx_conf_merge_msec_value(conf->buflen, prev->buflen, 0);
     ngx_conf_merge_msec_value(conf->sync, prev->sync, 300);
@@ -423,7 +416,7 @@ ngx_rtmp_live_stop(ngx_rtmp_session_t *s)
     if (lacf->publish_notify) {
         status[nstatus++] = ngx_rtmp_create_status(s,
                                                "NetStream.Play.UnpublishNotify",
-                                               "status", "Start publishing");
+                                               "status", "Stop publishing");
     }
 
     ngx_rtmp_live_set_status(s, control, status, nstatus, 0);
@@ -588,6 +581,11 @@ ngx_rtmp_live_close_stream(ngx_rtmp_session_t *s, ngx_rtmp_close_stream_t *v)
 
     if (ctx->publishing || ctx->stream->active) {
         ngx_rtmp_live_stop(s);
+    }
+
+    if (ctx->publishing) {
+        ngx_rtmp_send_status(s, "NetStream.Unpublish.Success",
+                             "status", "Stop publishing");
     }
 
     if (ctx->stream->ctx) {
@@ -759,7 +757,7 @@ ngx_rtmp_live_av(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
     cs->timestamp = ch.timestamp;
 
     delta = ch.timestamp - lh.timestamp;
-
+/*
     if (delta >> 31) {
         ngx_log_debug2(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
                        "live: clipping non-monotonical timestamp %uD->%uD",
@@ -769,7 +767,7 @@ ngx_rtmp_live_av(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
 
         ch.timestamp = lh.timestamp;
     }
-
+*/
     rpkt = ngx_rtmp_append_shared_bufs(cscf, NULL, in);
 
     ngx_rtmp_prepare_message(s, &ch, &lh, rpkt);
@@ -807,7 +805,7 @@ ngx_rtmp_live_av(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
             }
         }
 
-        if (lacf->meta && codec_ctx->meta) {
+        if (codec_ctx->meta) {
             meta = codec_ctx->meta;
             meta_version = codec_ctx->meta_version;
         }

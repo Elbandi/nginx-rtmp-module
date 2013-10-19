@@ -3,6 +3,8 @@
  */
 
 
+#include <ngx_config.h>
+#include <ngx_core.h>
 #include "ngx_rtmp_cmd_module.h"
 #include "ngx_rtmp_eval.h"
 #include <stdlib.h>
@@ -12,8 +14,10 @@
 #endif
 
 
+#if !(NGX_WIN32)
 static ngx_rtmp_publish_pt              next_publish;
 static ngx_rtmp_close_stream_pt         next_close_stream;
+#endif
 
 
 static ngx_int_t ngx_rtmp_exec_init_process(ngx_cycle_t *cycle);
@@ -27,7 +31,8 @@ static char * ngx_rtmp_exec_exec(ngx_conf_t *cf, ngx_command_t *cmd,
        void *conf);
 static char * ngx_rtmp_exec_exec_static(ngx_conf_t *cf, ngx_command_t *cmd, 
        void *conf);
-static void ngx_rtmp_exec_respawn(ngx_event_t *ev);
+static char *ngx_rtmp_exec_kill_signal(ngx_conf_t *cf, ngx_command_t *cmd,
+       void *conf);
 
 
 #define NGX_RTMP_EXEC_RESPAWN           0x01
@@ -72,14 +77,16 @@ typedef struct {
 
 typedef struct {
     u_char                              name[NGX_RTMP_MAX_NAME];
+    u_char                              args[NGX_RTMP_MAX_ARGS];
     ngx_array_t                         execs;
 } ngx_rtmp_exec_ctx_t;
 
 
-static char *ngx_rtmp_exec_kill_signal(ngx_conf_t *cf, ngx_command_t *cmd,
-       void *conf);
+#if !(NGX_WIN32)
+static void ngx_rtmp_exec_respawn(ngx_event_t *ev);
 static ngx_int_t ngx_rtmp_exec_kill(ngx_rtmp_exec_t *e, ngx_int_t kill_signal);
 static ngx_int_t ngx_rtmp_exec_run(ngx_rtmp_exec_t *e);
+#endif
 
 
 static ngx_command_t  ngx_rtmp_exec_commands[] = {
@@ -174,6 +181,10 @@ static ngx_rtmp_eval_t ngx_rtmp_exec_eval[] = {
       ngx_rtmp_exec_eval_astr,
       offsetof(ngx_rtmp_exec_ctx_t, name) },
 
+    { ngx_string("args"),
+      ngx_rtmp_exec_eval_astr,
+      offsetof(ngx_rtmp_exec_ctx_t, args) },
+
     ngx_rtmp_null_eval
 };
 
@@ -220,9 +231,11 @@ ngx_rtmp_exec_init_main_conf(ngx_conf_t *cf, void *conf)
         emcf->respawn_timeout = 5000;
     }
 
+#if !(NGX_WIN32)
     if (emcf->kill_signal == NGX_CONF_UNSET) {
         emcf->kill_signal = SIGKILL;
     }
+#endif
 
     if (ngx_array_init(&emcf->execs, cf->pool, emcf->confs.nelts,
                        sizeof(ngx_rtmp_exec_t)) != NGX_OK)
@@ -299,6 +312,7 @@ ngx_rtmp_exec_merge_app_conf(ngx_conf_t *cf, void *parent, void *child)
 static ngx_int_t
 ngx_rtmp_exec_init_process(ngx_cycle_t *cycle)
 {
+#if !(NGX_WIN32)
     ngx_rtmp_core_main_conf_t  *cmcf = ngx_rtmp_core_main_conf;
     ngx_rtmp_core_srv_conf_t  **cscf;
     ngx_rtmp_conf_ctx_t        *cctx;
@@ -335,13 +349,15 @@ ngx_rtmp_exec_init_process(ngx_cycle_t *cycle)
         e->respawn_evt.data = e;
         e->respawn_evt.log = e->log;
         e->respawn_evt.handler = ngx_rtmp_exec_respawn;
-        ngx_post_event((&e->respawn_evt), &ngx_posted_events);
+        ngx_post_event((&e->respawn_evt), &ngx_rtmp_init_queue);
     }
+#endif
 
     return NGX_OK;
 }
 
 
+#if !(NGX_WIN32)
 static void 
 ngx_rtmp_exec_respawn(ngx_event_t *ev)
 {
@@ -428,14 +444,13 @@ ngx_rtmp_exec_kill(ngx_rtmp_exec_t *e, ngx_int_t kill_signal)
 static ngx_int_t
 ngx_rtmp_exec_run(ngx_rtmp_exec_t *e)
 {
-#if !(NGX_WIN32)
     ngx_pid_t                       pid;
     int                             fd, maxfd;
     int                             pipefd[2];
     int                             ret;
     ngx_rtmp_exec_conf_t           *ec;
-    ngx_str_t                      *arg, a;
-    char                          **args;
+    ngx_str_t                      *arg_in, a;
+    char                          **args, **arg_out;
     ngx_uint_t                      n;
 
     ec = e->conf;
@@ -505,20 +520,32 @@ ngx_rtmp_exec_run(ngx_rtmp_exec_t *e)
             if (args == NULL) {
                 exit(1);
             }
-            arg = ec->args.elts;
-            args[0] = (char *) ec->cmd.data;
-            for (n = 0; n < ec->args.nelts; ++n, ++arg) {
+
+            arg_in = ec->args.elts;
+            arg_out = args;
+            *arg_out++ = (char *) ec->cmd.data;
+
+            for (n = 0; n < ec->args.nelts; n++, ++arg_in) {
+
                 if (e->session == NULL) {
-                    a = *arg;
+                    a = *arg_in;
                 } else {
-                    ngx_rtmp_eval(e->session, arg, ngx_rtmp_exec_eval_p, &a);
+                    ngx_rtmp_eval(e->session, arg_in, ngx_rtmp_exec_eval_p, &a);
                 }
-                args[n + 1] = (char *) a.data;
+                
+                if (ngx_rtmp_eval_streams(&a) != NGX_DONE) {
+                    continue;
+                }
+
+                *arg_out++ = (char *) a.data;
             }
-            args[n + 1] = NULL;
+
+            *arg_out = NULL;
+
             if (execvp((char *) ec->cmd.data, args) == -1) {
                 exit(1);
             }
+
             break;
 
         default:
@@ -551,7 +578,6 @@ ngx_rtmp_exec_run(ngx_rtmp_exec_t *e)
                            &ec->cmd, (ngx_int_t) pid);
             break;
     }
-#endif /* NGX_WIN32 */
     return NGX_OK;
 }
 
@@ -641,6 +667,7 @@ ngx_rtmp_exec_publish(ngx_rtmp_session_t *s, ngx_rtmp_publish_t *v)
     }
 
     ngx_memcpy(ctx->name, v->name, NGX_RTMP_MAX_NAME);
+    ngx_memcpy(ctx->args, v->args, NGX_RTMP_MAX_ARGS);
 
     ngx_log_debug1(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
                    "exec: run %uz command(s)", ctx->execs.nelts);
@@ -653,6 +680,7 @@ ngx_rtmp_exec_publish(ngx_rtmp_session_t *s, ngx_rtmp_publish_t *v)
 next:
     return next_publish(s, v);
 }
+#endif /* NGX_WIN32 */
 
 
 static char *
@@ -757,6 +785,7 @@ ngx_rtmp_exec_kill_signal(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     /* POSIX.1-1990 signals */
 
+#if !(NGX_WIN32)
     NGX_RMTP_EXEC_SIGNAL(HUP);
     NGX_RMTP_EXEC_SIGNAL(INT);
     NGX_RMTP_EXEC_SIGNAL(QUIT);
@@ -776,6 +805,7 @@ ngx_rtmp_exec_kill_signal(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     NGX_RMTP_EXEC_SIGNAL(TSTP);
     NGX_RMTP_EXEC_SIGNAL(TTIN);
     NGX_RMTP_EXEC_SIGNAL(TTOU);
+#endif
 
 #undef NGX_RMTP_EXEC_SIGNAL
 
@@ -786,11 +816,15 @@ ngx_rtmp_exec_kill_signal(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 static ngx_int_t
 ngx_rtmp_exec_postconfiguration(ngx_conf_t *cf)
 {
+#if !(NGX_WIN32)
+
     next_publish = ngx_rtmp_publish;
     ngx_rtmp_publish = ngx_rtmp_exec_publish;
 
     next_close_stream = ngx_rtmp_close_stream;
     ngx_rtmp_close_stream = ngx_rtmp_exec_close_stream;
+
+#endif /* NGX_WIN32 */
 
     return NGX_OK;
 }

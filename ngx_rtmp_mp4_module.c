@@ -3,6 +3,8 @@
  */
 
 
+#include <ngx_config.h>
+#include <ngx_core.h>
 #include "ngx_rtmp_play_module.h"
 #include "ngx_rtmp_codec_module.h"
 #include "ngx_rtmp_streams.h"
@@ -22,6 +24,14 @@ static ngx_int_t ngx_rtmp_mp4_reset(ngx_rtmp_session_t *s);
 
 
 #pragma pack(push,4)
+
+
+/* disable zero-sized array warning by msvc */
+
+#if (NGX_WIN32)
+#pragma warning(push)
+#pragma warning(disable:4200)
+#endif
 
 
 typedef struct {
@@ -100,6 +110,12 @@ typedef struct {
     uint64_t                            entries[0];
 } ngx_rtmp_mp4_offsets64_t;
 
+
+#if (NGX_WIN32)
+#pragma warning(pop)
+#endif
+
+
 #pragma pack(pop)
 
 
@@ -161,6 +177,7 @@ typedef struct {
 typedef struct {
     void                               *mmaped;
     size_t                              mmaped_size;
+    ngx_fd_t                            extra;
 
     unsigned                            meta_sent:1;
 
@@ -185,14 +202,14 @@ typedef struct {
     ((uint32_t)d << 24 | (uint32_t)c << 16 | (uint32_t)b << 8 | (uint32_t)a)
 
 
-static inline uint32_t
-ngx_rtmp_mp4_to_rtmp_timestamp(ngx_rtmp_mp4_track_t *t, uint32_t ts)
+static ngx_inline uint32_t
+ngx_rtmp_mp4_to_rtmp_timestamp(ngx_rtmp_mp4_track_t *t, uint64_t ts)
 {
-    return (uint64_t) ts * 1000 / t->time_scale;
+    return (uint32_t) (ts * 1000 / t->time_scale);
 }
 
 
-static inline uint32_t
+static ngx_inline uint32_t
 ngx_rtmp_mp4_from_rtmp_timestamp(ngx_rtmp_mp4_track_t *t, uint32_t ts)
 {
     return (uint64_t) ts * t->time_scale / 1000;
@@ -204,6 +221,80 @@ ngx_rtmp_mp4_from_rtmp_timestamp(ngx_rtmp_mp4_track_t *t, uint32_t ts)
 
 
 static u_char                           ngx_rtmp_mp4_buffer[1024*1024];
+
+
+#if (NGX_WIN32)
+static void *
+ngx_rtmp_mp4_mmap(ngx_fd_t fd, size_t size, off_t offset, ngx_fd_t *extra)
+{
+    void           *data;
+
+    *extra = CreateFileMapping(fd, NULL, PAGE_READONLY,
+                               (DWORD) ((uint64_t) size >> 32),
+                               (DWORD) (size & 0xffffffff),
+                               NULL);
+    if (*extra == NULL) {
+        return NULL;
+    }
+
+    data = MapViewOfFile(*extra, FILE_MAP_READ,
+                         (DWORD) ((uint64_t) offset >> 32),
+                         (DWORD) (offset & 0xffffffff),
+                         size);
+
+    if (data == NULL) {
+        CloseHandle(*extra);
+    }
+
+    /* 
+     * non-NULL result means map view handle is open 
+     * and should be closed later
+     */
+
+    return data;
+}
+
+
+static ngx_int_t
+ngx_rtmp_mp4_munmap(void *data, size_t size, ngx_fd_t *extra)
+{
+    ngx_int_t  rc;
+
+    rc = NGX_OK;
+
+    if (UnmapViewOfFile(data) == 0) {
+        rc = NGX_ERROR;
+    }
+
+    if (CloseHandle(*extra) == 0) {
+        rc = NGX_ERROR;
+    }
+
+    return rc;
+}
+
+#else
+
+static void *
+ngx_rtmp_mp4_mmap(ngx_fd_t fd, size_t size, off_t offset, ngx_fd_t *extra)
+{
+    void  *data;
+
+    data = mmap(NULL, size, PROT_READ, MAP_SHARED, fd, offset);
+
+    /* valid address is never NULL since there's no MAP_FIXED */
+
+    return data == MAP_FAILED ? NULL : data;
+}
+
+
+static ngx_int_t
+ngx_rtmp_mp4_munmap(void *data, size_t size, ngx_fd_t *extra)
+{
+    return munmap(data, size);
+}
+
+#endif
 
 
 static ngx_int_t ngx_rtmp_mp4_parse(ngx_rtmp_session_t *s, u_char *pos,
@@ -282,7 +373,8 @@ static ngx_rtmp_mp4_box_t                       ngx_rtmp_mp4_boxes[] = {
     { ngx_rtmp_mp4_make_tag('e','s','d','s'),   ngx_rtmp_mp4_parse_esds   }, 
     { ngx_rtmp_mp4_make_tag('.','m','p','3'),   ngx_rtmp_mp4_parse_mp3    }, 
     { ngx_rtmp_mp4_make_tag('n','m','o','s'),   ngx_rtmp_mp4_parse_nmos   }, 
-    { ngx_rtmp_mp4_make_tag('s','p','e','x'),   ngx_rtmp_mp4_parse_spex   }
+    { ngx_rtmp_mp4_make_tag('s','p','e','x'),   ngx_rtmp_mp4_parse_spex   },
+    { ngx_rtmp_mp4_make_tag('w','a','v','e'),   ngx_rtmp_mp4_parse        }
 };
 
 
@@ -355,7 +447,7 @@ ngx_rtmp_mp4_parse_trak(ngx_rtmp_session_t *s, u_char *pos, u_char *last)
                  ? NULL : &ctx->tracks[ctx->ntracks];
 
     if (ctx->track) {
-        ngx_memzero(ctx->track, sizeof(ctx->track));
+        ngx_memzero(ctx->track, sizeof(*ctx->track));
         ctx->track->id = ctx->ntracks;
 
         ngx_log_debug1(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
@@ -537,7 +629,7 @@ ngx_rtmp_mp4_parse_video(ngx_rtmp_session_t *s, u_char *pos, u_char *last,
         return NGX_ERROR;
     }
     
-    ctx->track->fhdr = ctx->track->codec;
+    ctx->track->fhdr = (u_char) ctx->track->codec;
 
     return NGX_OK;
 }
@@ -549,6 +641,7 @@ ngx_rtmp_mp4_parse_audio(ngx_rtmp_session_t *s, u_char *pos, u_char *last,
 {
     ngx_rtmp_mp4_ctx_t         *ctx;
     u_char                     *p;
+    ngx_uint_t                  version;
 
     ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_mp4_module);
 
@@ -562,7 +655,11 @@ ngx_rtmp_mp4_parse_audio(ngx_rtmp_session_t *s, u_char *pos, u_char *last,
         return NGX_ERROR;
     }
 
-    pos += 16;
+    pos += 8;
+
+    version = ngx_rtmp_r16(*(uint16_t *) pos);
+
+    pos += 8;
 
     ctx->nchannels = ngx_rtmp_r16(*(uint16_t *) pos);
 
@@ -605,10 +702,24 @@ ngx_rtmp_mp4_parse_audio(ngx_rtmp_session_t *s, u_char *pos, u_char *last,
             break;
     }
 
-    ngx_log_debug4(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
-                   "mp4: audio settings codec=%i, nchannels==%ui, "
+    ngx_log_debug5(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+                   "mp4: audio settings version=%ui, codec=%i, nchannels==%ui, "
                    "sample_size=%ui, sample_rate=%ui",
-                   codec, ctx->nchannels, ctx->sample_size, ctx->sample_rate);
+                   version, codec, ctx->nchannels, ctx->sample_size,
+                   ctx->sample_rate);
+
+    switch (version) {
+        case 1:
+            pos += 16;
+            break;
+
+        case 2:
+            pos += 36;
+    }
+
+    if (pos > last) {
+        return NGX_ERROR;
+    }
 
     if (ngx_rtmp_mp4_parse(s, pos, last) != NGX_OK) {
         return NGX_ERROR;
@@ -1328,7 +1439,7 @@ ngx_rtmp_mp4_update_offset(ngx_rtmp_session_t *s, ngx_rtmp_mp4_track_t *t)
             return NGX_ERROR;
         }
 
-        cr->offset = ngx_rtmp_r32(t->offsets->entries[chunk]);
+        cr->offset = (off_t) ngx_rtmp_r32(t->offsets->entries[chunk]);
         cr->size = 0;
 
         ngx_log_debug4(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
@@ -1350,7 +1461,7 @@ ngx_rtmp_mp4_update_offset(ngx_rtmp_session_t *s, ngx_rtmp_mp4_track_t *t)
             return NGX_ERROR;
         }
 
-        cr->offset = ngx_rtmp_r32(t->offsets64->entries[chunk]);
+        cr->offset = (off_t) ngx_rtmp_r64(t->offsets64->entries[chunk]);
         cr->size = 0;
 
         ngx_log_debug4(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
@@ -2041,7 +2152,7 @@ ngx_rtmp_mp4_send(ngx_rtmp_session_t *s, ngx_file_t *f, ngx_uint_t *ts)
         ngx_memzero(&h, sizeof(h));
 
         h.msid = NGX_RTMP_MSID;
-        h.type = t->type;
+        h.type = (uint8_t) t->type;
         h.csid = t->csid;
 
         lh = h;
@@ -2200,6 +2311,7 @@ ngx_rtmp_mp4_init(ngx_rtmp_session_t *s, ngx_file_t *f, ngx_int_t aindex,
     ssize_t                     n;
     size_t                      offset, page_offset, size, shift;
     uint64_t                    extended_size;
+    ngx_file_info_t             fi;
 
     ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_mp4_module);
 
@@ -2231,7 +2343,7 @@ ngx_rtmp_mp4_init(ngx_rtmp_session_t *s, ngx_file_t *f, ngx_int_t aindex,
             return NGX_ERROR;
         }
 
-        size = ngx_rtmp_r32(hdr[0]);
+        size = (size_t) ngx_rtmp_r32(hdr[0]);
         shift = sizeof(hdr);
 
         if (size == 1) {
@@ -2245,8 +2357,16 @@ ngx_rtmp_mp4_init(ngx_rtmp_session_t *s, ngx_file_t *f, ngx_int_t aindex,
                 return NGX_ERROR;
             }
 
-            size = ngx_rtmp_r64(extended_size);
+            size = (size_t) ngx_rtmp_r64(extended_size);
             shift += sizeof(extended_size);
+
+        } else if (size == 0) {
+            if (ngx_fd_info(f->fd, &fi) == NGX_FILE_ERROR) {
+                ngx_log_error(NGX_LOG_ERR, s->connection->log, ngx_errno,
+                              "mp4: " ngx_fd_info_n " failed");
+                return NGX_ERROR;
+            }
+            size = ngx_file_size(&fi) - offset;
         }
 
         if (hdr[1] == ngx_rtmp_mp4_make_tag('m','o','o','v')) {
@@ -2271,11 +2391,9 @@ ngx_rtmp_mp4_init(ngx_rtmp_session_t *s, ngx_file_t *f, ngx_int_t aindex,
     page_offset = offset & (ngx_pagesize - 1);
     ctx->mmaped_size = page_offset + size;
 
-    ctx->mmaped = mmap(NULL, ctx->mmaped_size, PROT_READ, MAP_SHARED,
-                       f->fd, offset - page_offset);
-
-    if (ctx->mmaped == MAP_FAILED) {
-        ctx->mmaped = NULL;
+    ctx->mmaped = ngx_rtmp_mp4_mmap(f->fd, ctx->mmaped_size,
+                                    offset - page_offset, &ctx->extra);
+    if (ctx->mmaped == NULL) {
         ngx_log_error(NGX_LOG_ERR, s->connection->log, ngx_errno,
                       "mp4: mmap failed at offset=%ui, size=%uz",
                       offset, size);
@@ -2298,7 +2416,9 @@ ngx_rtmp_mp4_done(ngx_rtmp_session_t *s, ngx_file_t *f)
         return NGX_OK;
     }
 
-    if (munmap(ctx->mmaped, ctx->mmaped_size)) {
+    if (ngx_rtmp_mp4_munmap(ctx->mmaped, ctx->mmaped_size, &ctx->extra)
+        != NGX_OK)
+    {
         ngx_log_error(NGX_LOG_ERR, s->connection->log, ngx_errno,
                       "mp4: munmap failed");
         return NGX_ERROR;

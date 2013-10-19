@@ -3,6 +3,8 @@
  */
 
 
+#include <ngx_config.h>
+#include <ngx_core.h>
 #include "ngx_rtmp_relay_module.h"
 #include "ngx_rtmp_cmd_module.h"
 
@@ -184,10 +186,10 @@ ngx_rtmp_relay_create_app_conf(ngx_conf_t *cf)
 
     racf->nbuckets = 1024;
     racf->log = &cf->cycle->new_log;
-    racf->buflen = NGX_CONF_UNSET;
+    racf->buflen = NGX_CONF_UNSET_MSEC;
     racf->session_relay = NGX_CONF_UNSET;
-    racf->push_reconnect = NGX_CONF_UNSET;
-    racf->pull_reconnect = NGX_CONF_UNSET;
+    racf->push_reconnect = NGX_CONF_UNSET_MSEC;
+    racf->pull_reconnect = NGX_CONF_UNSET_MSEC;
 
     return racf;
 }
@@ -342,6 +344,7 @@ ngx_rtmp_relay_create_connection(ngx_rtmp_conf_ctx_t *cctx, ngx_str_t* name,
     ngx_rtmp_session_t             *rs;
     ngx_peer_connection_t          *pc;
     ngx_connection_t               *c;
+    ngx_addr_t                     *addr;
     ngx_pool_t                     *pool;
     ngx_int_t                       rc;
     ngx_str_t                       v, *uri;
@@ -438,18 +441,29 @@ ngx_rtmp_relay_create_connection(ngx_rtmp_conf_ctx_t *cctx, ngx_str_t* name,
     if (pc == NULL) {
         goto clear;
     }
+
+    if (target->url.naddrs == 0) {
+        ngx_log_error(NGX_LOG_ERR, racf->log, 0,
+                      "relay: no address");
+        goto clear;
+    }
+
+    /* get address */
+    addr = &target->url.addrs[target->counter % target->url.naddrs];
+    target->counter++;
+
     /* copy log to keep shared log unchanged */
     rctx->log = *racf->log;
     pc->log = &rctx->log;
     pc->get = ngx_rtmp_relay_get_peer;
     pc->free = ngx_rtmp_relay_free_peer;
-    pc->name = &target->url.host;
-    pc->socklen = target->url.socklen;
+    pc->name = &addr->name;
+    pc->socklen = addr->socklen;
     pc->sockaddr = (struct sockaddr *)ngx_palloc(pool, pc->socklen);
     if (pc->sockaddr == NULL) {
         goto clear;
     }
-    ngx_memcpy(pc->sockaddr, &target->url.sockaddr, pc->socklen);
+    ngx_memcpy(pc->sockaddr, addr->sockaddr, pc->socklen);
 
     rc = ngx_event_connect_peer(pc);
     if (rc != NGX_OK && rc != NGX_AGAIN ) {
@@ -1583,6 +1597,7 @@ ngx_rtmp_relay_push_pull(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 static ngx_int_t
 ngx_rtmp_relay_init_process(ngx_cycle_t *cycle)
 {
+#if !(NGX_WIN32)
     ngx_rtmp_core_main_conf_t  *cmcf = ngx_rtmp_core_main_conf;
     ngx_rtmp_core_srv_conf_t  **pcscf, *cscf;
     ngx_rtmp_core_app_conf_t  **pcacf, *cacf;
@@ -1623,11 +1638,11 @@ ngx_rtmp_relay_init_process(ngx_cycle_t *cycle)
                 rs->cctx = *lst->ctx;
                 rs->cctx.app_conf = cacf->app_conf;
 
-                ngx_post_event(event, &ngx_posted_events);
+                ngx_post_event(event, &ngx_rtmp_init_queue);
             }
         }
     }
-
+#endif
     return NGX_OK;
 }
 

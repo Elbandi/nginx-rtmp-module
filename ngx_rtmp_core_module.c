@@ -7,6 +7,7 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_event.h>
+#include <nginx.h>
 #include "ngx_rtmp.h"
 
 
@@ -233,10 +234,10 @@ ngx_rtmp_core_create_srv_conf(ngx_conf_t *cf)
     conf->so_keepalive = NGX_CONF_UNSET;
     conf->max_streams = NGX_CONF_UNSET;
     conf->chunk_size = NGX_CONF_UNSET;
-    conf->ack_window = NGX_CONF_UNSET;
-    conf->max_message = NGX_CONF_UNSET;
-    conf->out_queue = NGX_CONF_UNSET;
-    conf->out_cork = NGX_CONF_UNSET;
+    conf->ack_window = NGX_CONF_UNSET_UINT;
+    conf->max_message = NGX_CONF_UNSET_SIZE;
+    conf->out_queue = NGX_CONF_UNSET_SIZE;
+    conf->out_cork = NGX_CONF_UNSET_SIZE;
     conf->play_time_fix = NGX_CONF_UNSET;
     conf->publish_time_fix = NGX_CONF_UNSET;
     conf->busy = NGX_CONF_UNSET;
@@ -599,7 +600,11 @@ ngx_rtmp_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
                 ls->bind = 1;
 
             } else {
-                len = ngx_sock_ntop(sa, buf, NGX_SOCKADDR_STRLEN, 1);
+                len = ngx_sock_ntop(sa,
+#if (nginx_version >= 1005003)
+                                    ls->socklen,
+#endif
+                                    buf, NGX_SOCKADDR_STRLEN, 1);
 
                 ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                                    "ipv6only is not supported "

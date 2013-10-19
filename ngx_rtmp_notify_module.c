@@ -6,10 +6,10 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include "ngx_rtmp.h"
-
 #include "ngx_rtmp_cmd_module.h"
 #include "ngx_rtmp_netcall_module.h"
 #include "ngx_rtmp_record_module.h"
+#include "ngx_rtmp_relay_module.h"
 
 
 static ngx_rtmp_connect_pt                      next_connect;
@@ -74,6 +74,7 @@ typedef struct {
     ngx_uint_t                                  method;
     ngx_msec_t                                  update_timeout;
     ngx_flag_t                                  update_strict;
+    ngx_flag_t                                  relay_redirect;
 } ngx_rtmp_notify_app_conf_t;
 
 
@@ -88,6 +89,7 @@ typedef struct {
     u_char                                      name[NGX_RTMP_MAX_NAME];
     u_char                                      args[NGX_RTMP_MAX_ARGS];
     ngx_event_t                                 update_evt;
+    time_t                                      start;
 } ngx_rtmp_notify_ctx_t;
 
 
@@ -198,6 +200,13 @@ static ngx_command_t  ngx_rtmp_notify_commands[] = {
       offsetof(ngx_rtmp_notify_app_conf_t, update_strict),
       NULL },
 
+    { ngx_string("notify_relay_redirect"),
+      NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_flag_slot,
+      NGX_RTMP_APP_CONF_OFFSET,
+      offsetof(ngx_rtmp_notify_app_conf_t, relay_redirect),
+      NULL },
+
       ngx_null_command
 };
 
@@ -245,9 +254,10 @@ ngx_rtmp_notify_create_app_conf(ngx_conf_t *cf)
         nacf->url[n] = NGX_CONF_UNSET_PTR;
     }
 
-    nacf->method = NGX_CONF_UNSET;
-    nacf->update_timeout = NGX_CONF_UNSET;
+    nacf->method = NGX_CONF_UNSET_UINT;
+    nacf->update_timeout = NGX_CONF_UNSET_MSEC;
     nacf->update_strict = NGX_CONF_UNSET;
+    nacf->relay_redirect = NGX_CONF_UNSET;
 
     return nacf;
 }
@@ -276,6 +286,7 @@ ngx_rtmp_notify_merge_app_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_msec_value(conf->update_timeout, prev->update_timeout,
                               30000);
     ngx_conf_merge_value(conf->update_strict, prev->update_strict, 0);
+    ngx_conf_merge_value(conf->relay_redirect, prev->relay_redirect, 0);
 
     return NGX_CONF_OK;
 }
@@ -296,7 +307,7 @@ ngx_rtmp_notify_create_srv_conf(ngx_conf_t *cf)
         nscf->url[n] = NGX_CONF_UNSET_PTR;
     }
 
-    nscf->method = NGX_CONF_UNSET;
+    nscf->method = NGX_CONF_UNSET_UINT;
 
     return nscf;
 }
@@ -590,7 +601,7 @@ ngx_rtmp_notify_play_create(ngx_rtmp_session_t *s, void *arg,
                             sizeof("&call=play") + 
                             sizeof("&name=") + name_len * 3 +
                             sizeof("&start=&duration=&reset=") +
-                            NGX_OFF_T_LEN * 3 + 1 + args_len);
+                            NGX_INT32_LEN * 3 + 1 + args_len);
     if (b == NULL) {
         return NULL;
     }
@@ -806,6 +817,7 @@ ngx_rtmp_notify_update_create(ngx_rtmp_session_t *s, void *arg,
 
     b = ngx_create_temp_buf(pool,
                             sizeof("&call=update") + sfx.len +
+                            sizeof("&time=") + NGX_TIME_T_LEN +
                             sizeof("&name=") + name_len * 3 +
                             1 + args_len);
     if (b == NULL) {
@@ -818,6 +830,10 @@ ngx_rtmp_notify_update_create(ngx_rtmp_session_t *s, void *arg,
     b->last = ngx_cpymem(b->last, (u_char*) "&call=update",
                          sizeof("&call=update") - 1);
     b->last = ngx_cpymem(b->last, sfx.data, sfx.len);
+
+    b->last = ngx_cpymem(b->last, (u_char *) "&time=",
+                         sizeof("&time=") - 1);
+    b->last = ngx_sprintf(b->last, "%T", ngx_cached_time->sec - ctx->start);
 
     if (name_len) {
         b->last = ngx_cpymem(b->last, (u_char*) "&name=", sizeof("&name=") - 1);
@@ -912,7 +928,14 @@ ngx_rtmp_notify_parse_http_retcode(ngx_rtmp_session_t *s,
             if (c >= (u_char)'0' && c <= (u_char)'9') {
                 ngx_log_debug1(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
                     "notify: HTTP retcode: %dxx", (int)(c - '0'));
-                return c == (u_char)'2' ? NGX_OK : NGX_ERROR;
+                switch (c) {
+                    case (u_char) '2':
+                        return NGX_OK;
+                    case (u_char) '3':
+                        return NGX_AGAIN;
+                    default:
+                        return NGX_ERROR;
+                }
             }
 
             ngx_log_error(NGX_LOG_INFO, s->connection->log, 0,
@@ -929,11 +952,116 @@ ngx_rtmp_notify_parse_http_retcode(ngx_rtmp_session_t *s,
 
     /* 
      * not enough data;
-     * it can happen in case of empty or broken reply;
-     * let the caller decide if that's an error or not
+     * it can happen in case of empty or broken reply
      */
 
-    return NGX_DONE;
+    return NGX_ERROR;
+}
+
+
+static ngx_int_t 
+ngx_rtmp_notify_parse_http_header(ngx_rtmp_session_t *s, 
+        ngx_chain_t *in, ngx_str_t *name, u_char *data, size_t len)
+{
+    ngx_buf_t      *b;
+    ngx_int_t       matched;
+    u_char         *p, c;
+    ngx_uint_t      n;
+
+    enum {
+        parse_name,
+        parse_space,
+        parse_value,
+        parse_value_newline
+    } state = parse_name;
+
+    n = 0;
+    matched = 0;
+
+    while (in) {
+        b = in->buf;
+
+        for (p = b->pos; p != b->last; ++p) {
+            c = *p;
+
+            if (c == '\r') {
+                continue;
+            }
+
+            switch (state) {
+                case parse_value_newline:
+                    if (c == ' ' || c == '\t') {
+                        state = parse_space;
+                        break;
+                    }
+
+                    if (matched) {
+                        return n;
+                    }
+
+                    if (c == '\n') {
+                        return NGX_OK;
+                    }
+
+                    n = 0;
+                    state = parse_name;
+
+                case parse_name:
+                    switch (c) {
+                        case ':':
+                            matched = (n == name->len);
+                            n = 0;
+                            state = parse_space;
+                            break;
+                        case '\n':
+                            n = 0;
+                            break;
+                        default:
+                            if (n < name->len &&
+                                ngx_tolower(c) == ngx_tolower(name->data[n]))
+                            {
+                                ++n;
+                                break;
+                            }
+                            n = name->len + 1;
+                    }
+                    break;
+
+                case parse_space:
+                    if (c == ' ' || c == '\t') {
+                        break;
+                    }
+                    state = parse_value;
+
+                case parse_value:
+                    if (c == '\n') {
+                        state = parse_value_newline;
+                        break;
+                    }
+
+                    if (matched && n + 1 < len) {
+                        data[n++] = c;
+                    }
+
+                    break;
+            }
+        }
+
+        in = in->next;
+    }
+
+    return NGX_OK;
+}
+
+
+static void
+ngx_rtmp_notify_clear_flag(ngx_rtmp_session_t *s, ngx_uint_t flag)
+{
+    ngx_rtmp_notify_ctx_t  *ctx;
+
+    ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_notify_module);
+
+    ctx->flags &= ~flag;
 }
 
 
@@ -941,11 +1069,31 @@ static ngx_int_t
 ngx_rtmp_notify_connect_handle(ngx_rtmp_session_t *s, 
         void *arg, ngx_chain_t *in)
 {
-    if (ngx_rtmp_notify_parse_http_retcode(s, in) != NGX_OK) {
+    ngx_rtmp_connect_t *v = arg;
+    ngx_int_t           rc;
+    u_char              app[NGX_RTMP_MAX_NAME];
+
+    static ngx_str_t    location = ngx_string("location");
+
+    rc = ngx_rtmp_notify_parse_http_retcode(s, in);
+    if (rc == NGX_ERROR) {
         return NGX_ERROR;
     }
 
-    return next_connect(s, (ngx_rtmp_connect_t *)arg);
+    if (rc == NGX_AGAIN) {
+        ngx_log_debug0(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+                       "notify: connect redirect received");
+
+        rc = ngx_rtmp_notify_parse_http_header(s, in, &location, app,
+                                               sizeof(app) - 1);
+        if (rc > 0) {
+            *ngx_cpymem(v->app, app, rc) = 0;
+            ngx_log_error(NGX_LOG_INFO, s->connection->log, 0,
+                          "notify: connect redirect to '%s'", v->app);
+        }
+    }
+
+    return next_connect(s, v);
 }
 
 
@@ -953,11 +1101,78 @@ static ngx_int_t
 ngx_rtmp_notify_publish_handle(ngx_rtmp_session_t *s, 
         void *arg, ngx_chain_t *in)
 {
-    if (ngx_rtmp_notify_parse_http_retcode(s, in) != NGX_OK) {
+    ngx_rtmp_publish_t         *v = arg;
+    ngx_int_t                   rc;
+    ngx_str_t                   local_name;
+    ngx_rtmp_relay_target_t     target;
+    ngx_url_t                  *u;
+    ngx_rtmp_notify_app_conf_t *nacf;
+    u_char                      name[NGX_RTMP_MAX_NAME];
+
+    static ngx_str_t    location = ngx_string("location");
+
+    rc = ngx_rtmp_notify_parse_http_retcode(s, in);
+    if (rc == NGX_ERROR) {
+        ngx_rtmp_notify_clear_flag(s, NGX_RTMP_NOTIFY_PUBLISHING);
         return NGX_ERROR;
     }
 
-    return next_publish(s, (ngx_rtmp_publish_t *)arg);
+    if (rc != NGX_AGAIN) {
+        goto next;
+    }
+
+    /* HTTP 3xx */
+
+    ngx_log_debug0(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+                   "notify: publish redirect received");
+
+    rc = ngx_rtmp_notify_parse_http_header(s, in, &location, name,
+                                           sizeof(name) - 1);
+    if (rc <= 0) {
+        goto next;
+    }
+
+    if (ngx_strncasecmp(name, (u_char *) "rtmp://", 7)) {
+        *ngx_cpymem(v->name, name, rc) = 0;
+        ngx_log_error(NGX_LOG_INFO, s->connection->log, 0,
+                      "notify: publish redirect to '%s'", v->name);
+        goto next;
+    }
+
+    /* push */
+
+    nacf = ngx_rtmp_get_module_app_conf(s, ngx_rtmp_notify_module);
+    if (nacf->relay_redirect) {
+        *ngx_cpymem(v->name, name, rc) = 0;
+    }
+
+    ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
+                  "notify: push '%s' to '%*s'", v->name, rc, name);
+
+    local_name.data = v->name;
+    local_name.len = ngx_strlen(v->name);
+
+    ngx_memzero(&target, sizeof(target));
+
+    u = &target.url;
+    u->url = local_name;
+    u->url.data = name + 7;
+    u->url.len = rc - 7;
+    u->default_port = 1935;
+    u->uri_part = 1;
+    u->no_resolve = 1; /* want ip here */
+
+    if (ngx_parse_url(s->connection->pool, u) != NGX_OK) {
+        ngx_log_error(NGX_LOG_INFO, s->connection->log, 0,
+                      "notify: push failed '%V'", &local_name);
+        return NGX_ERROR;
+    }
+
+    ngx_rtmp_relay_push(s, &local_name, &target);
+
+next:
+
+    return next_publish(s, v);
 }
 
 
@@ -965,11 +1180,78 @@ static ngx_int_t
 ngx_rtmp_notify_play_handle(ngx_rtmp_session_t *s, 
         void *arg, ngx_chain_t *in)
 {
-    if (ngx_rtmp_notify_parse_http_retcode(s, in) != NGX_OK) {
+    ngx_rtmp_play_t            *v = arg;
+    ngx_int_t                   rc;
+    ngx_str_t                   local_name;
+    ngx_rtmp_relay_target_t     target;
+    ngx_url_t                  *u;
+    ngx_rtmp_notify_app_conf_t *nacf;
+    u_char                      name[NGX_RTMP_MAX_NAME];
+
+    static ngx_str_t            location = ngx_string("location");
+
+    rc = ngx_rtmp_notify_parse_http_retcode(s, in);
+    if (rc == NGX_ERROR) {
+        ngx_rtmp_notify_clear_flag(s, NGX_RTMP_NOTIFY_PLAYING);
         return NGX_ERROR;
     }
 
-    return next_play(s, (ngx_rtmp_play_t *)arg);
+    if (rc != NGX_AGAIN) {
+        goto next;
+    }
+
+    /* HTTP 3xx */
+
+    ngx_log_debug0(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+                   "notify: play redirect received");
+
+    rc = ngx_rtmp_notify_parse_http_header(s, in, &location, name,
+                                           sizeof(name) - 1);
+    if (rc <= 0) {
+        goto next;
+    }
+
+    if (ngx_strncasecmp(name, (u_char *) "rtmp://", 7)) {
+        *ngx_cpymem(v->name, name, rc) = 0;
+        ngx_log_error(NGX_LOG_INFO, s->connection->log, 0,
+                      "notify: play redirect to '%s'", v->name);
+        goto next;
+    }
+
+    /* pull */
+
+    nacf = ngx_rtmp_get_module_app_conf(s, ngx_rtmp_notify_module);
+    if (nacf->relay_redirect) {
+        *ngx_cpymem(v->name, name, rc) = 0;
+    }
+
+    ngx_log_error(NGX_LOG_INFO, s->connection->log, 0,
+                  "notify: pull '%s' from '%*s'", v->name, rc, name);
+
+    local_name.data = v->name;
+    local_name.len = ngx_strlen(v->name);
+
+    ngx_memzero(&target, sizeof(target));
+
+    u = &target.url;
+    u->url = local_name;
+    u->url.data = name + 7;
+    u->url.len = rc - 7;
+    u->default_port = 1935;
+    u->uri_part = 1;
+    u->no_resolve = 1; /* want ip here */
+
+    if (ngx_parse_url(s->connection->pool, u) != NGX_OK) {
+        ngx_log_error(NGX_LOG_INFO, s->connection->log, 0,
+                      "notify: pull failed '%V'", &local_name);
+        return NGX_ERROR;
+    }
+
+    ngx_rtmp_relay_pull(s, &local_name, &target);
+
+next:
+
+    return next_play(s, v);
 }
 
 
@@ -1080,6 +1362,8 @@ ngx_rtmp_notify_init(ngx_rtmp_session_t *s,
     if (ctx->update_evt.timer_set) {
         return;
     }
+
+    ctx->start = ngx_cached_time->sec;
 
     e = &ctx->update_evt;
 

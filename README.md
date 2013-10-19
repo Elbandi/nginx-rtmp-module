@@ -4,7 +4,7 @@
 
 ### Project blog
 
-  http://rarut.wordpress.com
+  http://nginx-rtmp.blogspot.com
 
 ### Wiki manual
 
@@ -16,10 +16,7 @@
 
   https://groups.google.com/group/nginx-rtmp-ru (Russian)
 
-
-### Project page at github
-
-  Project features, examples, donation information
+### Donation page (Paypal etc)
 
   http://arut.github.com/nginx-rtmp-module/
 
@@ -60,8 +57,7 @@
 * Statistics in XML/XSL in machine- & human-
   readable form
 
-* Linux/FreeBSD/MacOS
-
+* Linux/FreeBSD/MacOS/Windows
 
 ### Build
 
@@ -71,9 +67,18 @@ cd to NGINX source directory & run this:
     make
     make install
 
-See this article about building nginx-rtmp with HLS support:
-https://github.com/arut/nginx-rtmp-module/wiki/Building-nginx-rtmp-with-HLS-support
+Several versions of nginx (1.3.14 - 1.5.0) require http_ssl_module to be
+added as well:
 
+    ./configure --add-module=<path-to-nginx-rtmp-module> --with-http_ssl_module
+
+### Windows limitations
+
+Windows support is limited. These features are not supported
+
+* execs
+* static pulls
+* auto_push
 
 ### RTMP URL format
 
@@ -238,7 +243,7 @@ rtmp_auto_push directive.
             # for the fragments. The directory contents is served via HTTP (see
             # http{} section in config)
             #
-            # Incoming stream must be in H264/AAC/MP3. For iPhones use baseline H264
+            # Incoming stream must be in H264/AAC. For iPhones use baseline H264
             # profile (see ffmpeg example).
             # This example creates RTMP stream from movie ready for HLS:
             #
@@ -285,6 +290,7 @@ rtmp_auto_push directive.
                 # Serve HLS fragments
                 types {
                     application/vnd.apple.mpegurl m3u8;
+                    video/mp2t ts;
                 }
                 alias /tmp/app;
                 expires -1;

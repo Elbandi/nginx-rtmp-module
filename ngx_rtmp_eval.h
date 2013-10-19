@@ -6,6 +6,9 @@
 #ifndef _NGX_RTMP_EVAL_H_INCLUDED_
 #define _NGX_RTMP_EVAL_H_INCLUDED_
 
+
+#include <ngx_config.h>
+#include <ngx_core.h>
 #include "ngx_rtmp.h"
 
 
@@ -32,6 +35,9 @@ extern ngx_rtmp_eval_t      ngx_rtmp_eval_session[];
 
 ngx_int_t ngx_rtmp_eval(ngx_rtmp_session_t *s, ngx_str_t *in,
           ngx_rtmp_eval_t **e, ngx_str_t *out);
+
+
+ngx_int_t ngx_rtmp_eval_streams(ngx_str_t *in);
 
 
 #endif /* _NGX_RTMP_EVAL_H_INCLUDED_ */

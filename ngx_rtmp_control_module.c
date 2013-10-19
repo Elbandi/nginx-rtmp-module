@@ -3,15 +3,15 @@
  */
 
 
-#include <nginx.h>
+#include <ngx_config.h>
+#include <ngx_core.h>
 #include <ngx_http.h>
-
 #include "ngx_rtmp.h"
 #include "ngx_rtmp_live_module.h"
 #include "ngx_rtmp_record_module.h"
 
 
-static ngx_int_t ngx_rtmp_control_postconfiguration(ngx_conf_t *cf);
+static char *ngx_rtmp_control(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static void * ngx_rtmp_control_create_loc_conf(ngx_conf_t *cf);
 static char * ngx_rtmp_control_merge_loc_conf(ngx_conf_t *cf, 
        void *parent, void *child);
@@ -52,7 +52,7 @@ static ngx_command_t  ngx_rtmp_control_commands[] = {
 
     { ngx_string("rtmp_control"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_1MORE,
-      ngx_conf_set_bitmask_slot,
+      ngx_rtmp_control,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_rtmp_control_loc_conf_t, control),
       ngx_rtmp_control_masks },
@@ -63,7 +63,7 @@ static ngx_command_t  ngx_rtmp_control_commands[] = {
 
 static ngx_http_module_t  ngx_rtmp_control_module_ctx = {
 	NULL,                               /* preconfiguration */
-	ngx_rtmp_control_postconfiguration, /* postconfiguration */
+	NULL,                               /* postconfiguration */
 
 	NULL,                               /* create main configuration */
 	NULL,                               /* init main configuration */
@@ -392,7 +392,7 @@ ngx_rtmp_control_drop(ngx_http_request_t *r, ngx_str_t *method)
 
     /* output ndropped */
 
-    len = NGX_OFF_T_LEN;
+    len = NGX_INT_T_LEN;
 
     p = ngx_palloc(r->connection->pool, len);
     if (p == NULL) {
@@ -511,19 +511,13 @@ ngx_rtmp_control_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 }
 
 
-static ngx_int_t
-ngx_rtmp_control_postconfiguration(ngx_conf_t *cf)
+static char *
+ngx_rtmp_control(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
-    ngx_http_handler_pt            *h;
-    ngx_http_core_main_conf_t      *cmcf;
+    ngx_http_core_loc_conf_t  *clcf;
 
-    cmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
+    clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
+    clcf->handler = ngx_rtmp_control_handler;
 
-    h = ngx_array_push(&cmcf->phases[NGX_HTTP_CONTENT_PHASE].handlers);
-    if (h == NULL) {
-        return NGX_ERROR;
-    }
-    *h = ngx_rtmp_control_handler;
-
-    return NGX_OK;
-} 
+    return ngx_conf_set_bitmask_slot(cf, cmd, conf);
+}

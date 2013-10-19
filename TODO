@@ -1,15 +1,5 @@
-- HLS monotonical dts
-
-- total client counter
-
-- improve session epoch variable
-
-- fix auto-pushing to cache manager
-
-- HDS
-
-- DNS round-robin url
-
+- mpeg-dash
+- akamai auth
+- manual recorder custom file name
+- bandwidth control (per-app & total)
 - multiple streams per connection
-
-- VOD HLS
